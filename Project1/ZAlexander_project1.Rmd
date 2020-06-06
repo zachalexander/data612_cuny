@@ -5,24 +5,276 @@ date: "6/6/2020"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+***
+
+#### Libraries used
+
+```{r setup, warning=FALSE, message=FALSE}
+require(dplyr)
+require(tidyr)
+require(caTools)
+require(knitr)
+require(kableExtra)
 ```
+
+
+***
 
 #### Describing the Recommender System
 
 The recommender system that I'll be buiding for this project will be to recommend certain data science books to readers. 
 
-```{r cars}
-summary(cars)
+
+***
+
+#### Loading the dataset
+
+I created a dummy dataset and uploaded it to my GitHub account. The dataset has 15 user ratings for seven different data science books, and includes some missing data. To read this file into R, I used the `read.csv()` function and stored it in a data frame called `bookdf`:  
+
+```{r}
+bookdf <- read.csv('https://raw.githubusercontent.com/zachalexander/data612_cuny/master/Project1/book_recommendations.csv')
 ```
 
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+As we can see from looking at the dimensions of the data frame below, it has 15 rows of user ratings, and 8 columns (1 column shows the userID, which I'll drop a little later):
+```{r}
+dim(bookdf)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+We can take a look at the ratings data frame below:
+
+```{r}
+kable(bookdf, 'html') %>% 
+  kable_styling(bookdf, bootstrap_options = c("striped", "hover", "condensed", "responsive"), font_size = 10)
+```
+
+***
+
+#### Split data into training and test dataset
+
+Now, with my data frame loaded properly in R, I can then split this data into a training and test dataset. I'll also want to convert the data frames into matrices, so I can do easy calculations on them later. The syntax for splitting the full data frame into a 70/30 training and testing data sets is below, as well as syntax to select just the relevant columns and converting the data frames into matrices:  
+
+```{r}
+set.seed(123)
+bookdf$split <- sample.split(bookdf$User, SplitRatio = 0.7)
+
+bookdf_train <- bookdf %>% 
+  filter(split == TRUE) %>% 
+  select(Data.Science.for.Business, R.for.Data.Science, Super.Forecasting, Applied.Text.Analysis.with.Python, Applied.Predictive.Modeling, Data.Science.from.Scratch, Thinking..Fast.and.Slow)
+
+bookdf_test <- bookdf %>% 
+  filter(split != TRUE) %>% 
+  select(Data.Science.for.Business, R.for.Data.Science, Super.Forecasting, Applied.Text.Analysis.with.Python, Applied.Predictive.Modeling, Data.Science.from.Scratch, Thinking..Fast.and.Slow)
+
+bookdf_train <- data.matrix(bookdf_train, rownames.force = NA)
+bookdf_test <- data.matrix(bookdf_test, rownames.force = NA)
+```
+
+
+****
+
+#### Compute the raw average of the training dataset
+
+Before we compute the raw averages, here's a quick look at my training and testing matrices:
+
+To save space, I renamed the column names, but the key for each book is below:
+
++ Data Science for Business = 1  
++ R for Data Science = 2  
++ Super Forecasting = 3  
++ Applied Text Analysis with Python = 4  
++ Applied Predictive Modeling = 5  
++ Data Science from Scratch = 6  
++ Thinking, Fast and Slow = 7  
+
+##### Training matrix
+
+```{r}
+colnames(bookdf_train) <- c(1, 2, 3, 4, 5, 6, 7)
+bookdf_train
+```
+
+
+##### Testing matrix
+
+```{r}
+colnames(bookdf_test) <- c(1, 2, 3, 4, 5, 6, 7)
+bookdf_test
+```
+
+Now, with the data split accordingly, I can take the raw average (mean) of the training dataset: 
+```{r}
+raw_avg <- mean(bookdf_train, na.rm = TRUE)
+```
+
+I've found that the raw average of the training dataset is 2.75. We can use this value to create two train/test matrices with the proper dimensions that just consist of 2.75, which we can use later for further calculations.
+```{r}
+avg_train <- matrix(raw_avg, nrow=10, ncol=7, byrow=TRUE)
+avg_test <- matrix(raw_avg, nrow=5, ncol=7, byrow=TRUE)
+```
+
+These matrices are our first approximation of ratings for users. However, this does not factor in any biases and will therefore be rough estimates. To calculate the amount of error we may receive by using this calculation for our recommendations, we can find the RMSE.  
+
+***
+
+#### RMSE calculations
+
+Before using a more shorthand method to calculate the RMSE, given that I'm working with matrices in R and can do these calculations on one line, I thought I'd demonstrate how to calculate the RMSE on our testing dataset given there are only 5 users.  
+
+First, I'd utilize the raw average computed above (2.75), and subtract it from each available rating. After subtracting, I'd square the difference and saved these values in a new matrix called `test`. Then, I took all of the values calculated in the test matrix and found the average. Since there were 21 available ratings, I used this value as the denominator to calculate the mean. Finally, I took the square root of this mean value.
+
+```{r}
+test <- matrix(c(NA, (3-2.75)^2, (4-2.75)^2, (3-2.75)^2, (2-2.75)^2, (1-2.75)^2, NA,
+         NA, NA, (5-2.75)^2, (5-2.75)^2, NA, (1-2.75)^2, NA,
+         (5-2.75)^2, (3-2.75)^2, (4-2.75)^2, (1-2.75)^2, (3-2.75)^2, NA, NA,
+         NA, (1-2.75)^2, NA, NA, (3-2.75)^2, NA, (2-2.75)^2,
+         NA, (2-2.75)^2, (2-2.75)^2, (3-2.75)^2, (4-2.75)^2, NA, (4-2.75)^2), nrow = 5, ncol = 7, byrow = TRUE)
+
+mean_test <- (0.0625 + 1.5625 + 0.0625 + 0.5625 + 3.0625 + 5.0625 + 5.0625 + 3.0625 + 5.0625 + 0.0625 + 1.5625 + 3.0625 + 0.0625 + 3.0625 + 0.0625 + 0.5625 + 0.5625 + 0.5625 + 0.0625 + 1.5625 + 1.5625) / 21
+
+paste0('The RMSE of the test matrix is ', round(sqrt(mean_test), 2))
+```
+
+#### Faster calculations of RMSE
+
+To check this calculation, I can perform the same calculations using the shorthand syntax below:
+```{r}
+rmse_test <- sqrt(mean((bookdf_test - avg_test)^2, na.rm = TRUE))
+paste0('We can see that we also get the same RMSE for the test matrix of ', round(rmse_test, 2))
+```
+
+We can do the same RMSE calculation on our training matrix:  
+```{r}
+rmse_train <- sqrt(mean((bookdf_train - avg_train)^2, na.rm = TRUE))
+paste0('The RMSE of the train matrix is ', round(rmse_train, 3))
+```
+
+With our initial RMSE calculations completed, we can see that there is pretty substantial error. To lower these values, we can calculate the bias on all of the books and users in the matrices.
+
+
+***
+
+#### Finding User Bias
+
+To find the user bias in ratings, we can take the mean value of each user's ratings and subtract it from our raw average value of 2.75. I wrote a for loop below that will append these values to a user-bias matrix and computed these values for both our training and testing matrices:    
+```{r}
+user_bias <- c()
+raw_avg <- 2.75
+for(i in 1:length(bookdf_train[,1])){
+  user_bias[i] <- (mean(bookdf_train[i, ], na.rm = TRUE) - raw_avg)
+}
+
+user_bias_train <- matrix(user_bias, nrow = 10, ncol = 1)
+user_bias_train
+```
+
+```{r}
+user_bias <- c()
+for(i in 1:length(bookdf_test[,1])){
+  user_bias[i] <- (mean(bookdf_test[i, ], na.rm = TRUE) - raw_avg)
+}
+
+user_bias_test <- matrix(user_bias, nrow = 5, ncol = 1)
+user_bias_test
+```
+
+As we can see, calculations above and below zero indicate a user's relative bias as a rater of books. User #7 in the training dataset seems to be more of a positive rater of books, with a high bias value. Whereas User #4 in the testing dataset seems to be more of a negative reviewer of books overall. We can use this information to help us later as we continue to build our recommender system.  
+
+***
+
+#### Finding Book Bias
+
+Next, we can do the same calculations for each book, to find bias of people's viewpoints of the books. We will use the same for loop as above, but computing averages down the columns for each book instead of across each row for users. I've conducted these calculations on both the training and test matrices and stored them in book-bias matrices:  
+
+```{r}
+book_bias <- c()
+for(i in 1:length(bookdf_train[1,])){
+  book_bias[i] <- (mean(bookdf_train[,i ], na.rm = TRUE) - raw_avg)
+}
+
+book_bias_train <- matrix(book_bias, nrow = 1, ncol = 7)
+book_bias_train
+```
+
+```{r}
+book_bias <- c()
+for(i in 1:length(bookdf_test[1,])){
+  book_bias[i] <- (mean(bookdf_test[,i ], na.rm = TRUE) - raw_avg)
+}
+
+book_bias_test <- matrix(book_bias, nrow = 1, ncol = 7)
+book_bias_test
+```
+
+As we can see from our above calculations, "Super Forecasting" seems to be a well-liked book relative to others in our dataset. Additionally, it looks like "Data Science from Scratch" is more of a disliked book relative to the other books in our dataset.
+
+***
+
+#### Calculating the baseline predictors
+
+With our biases calculated and stored in their proper matrices, I then created an additional for loop to iterate over the rows and columns of our bias matrices, add these values to our raw average computation of 2.75, and append them to a new baseline matrix for both the training and testing datasets. I also built in logic to ensure that any calculation above 5 was truncated to 5, and any calculation below 1 was truncated to 1.
+
+```{r}
+baseline_train <- matrix(NA, nrow = 10, ncol = 7)
+for(i in 1:10){
+  for(j in 1:7){
+    baseline_train[i, j] <- ifelse((raw_avg + user_bias_train[i, 1] + book_bias_train[1, j]) > 5, 5, 
+                           ifelse(raw_avg + user_bias_train[i, 1] + book_bias_train[1, j] < 1, 1,
+                           raw_avg + user_bias_train[i, 1] + book_bias_train[1, j]))
+  }
+}
+baseline_train
+```
+
+```{r}
+baseline_test <- matrix(NA, nrow = 5, ncol = 7)
+for(i in 1:5){
+  for(j in 1:7){
+    baseline_test[i, j] <- ifelse((raw_avg + user_bias_test[i, 1] + book_bias_test[1, j]) > 5, 5, 
+                           ifelse(raw_avg + user_bias_test[i, 1] + book_bias_test[1, j] < 1, 1,
+                           raw_avg + user_bias_test[i, 1] + book_bias_test[1, j]))
+  }
+}
+baseline_test
+```
+
+We can see from above that we now have our baseline predictor matrices for both our training and testing datasets, which shows rating values that incorporate bias calculations and our raw average.
+
+***
+
+#### RMSE with baseline predictors
+
+To test to see if these new baseline predictor matrices are more effective and contain less error than our raw average matrix computed earlier, we can calculate the RMSE on these as well:  
+
+```{r}
+rmse_train_baseline <- sqrt(mean((bookdf_train - baseline_train)^2, na.rm = TRUE))
+rmse_test_baseline <- sqrt(mean((bookdf_test - baseline_test)^2, na.rm = TRUE))
+```
+
+
+```{r}
+paste0('The RMSE value for our baseline training matrix is ', round(rmse_train_baseline, 2))
+```
+
+```{r}
+paste0('The RMSE value for our baseline testing matrix is ', round(rmse_test_baseline, 2))
+```
+
+As we can see, these RMSE values are much lower than our initial RMSE values predicted earlier -- indicating that these matrices that factor in bias will be better performers in predicting user ratings on the books listed in the dataset.
+
+***
+
+#### Percent improvement and takeaways
+
+To demonstrate the actual improvement from our initial RMSE values calculated on our raw average matrices, we can perform the calculations below:
+
+```{r}
+pct_improve_train <- (1 - (rmse_train_baseline/rmse_train)) * 100
+paste0('The RMSE improved by ', round(pct_improve_train, 2), '% on the training dataset.')
+```
+
+```{r}
+pct_improve_test <- (1 - (rmse_test_baseline/rmse_test)) * 100
+paste0('The RMSE improved by ', round(pct_improve_test, 2), '% on the test dataset.')
+```
+
+In the end, the baseline predictors reduced the error in the predictions by almost a third relative to the raw average predictors!
