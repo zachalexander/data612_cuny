@@ -1,0 +1,28 @@
+---
+title: 'DATA612 - Project #1'
+author: "Zach Alexander"
+date: "6/6/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Describing the Recommender System
+
+The recommender system that I'll be buiding for this project will be to recommend certain data science books to readers. 
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
