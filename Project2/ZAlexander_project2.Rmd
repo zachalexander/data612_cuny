@@ -1,0 +1,643 @@
+---
+title: 'DATA 612 - Project #2'
+author: "Zach Alexander"
+date: "6/12/2020"
+output: html_document
+---
+
+***
+
+#### Instructions
+
+The goal of this assignment is for you to try out different ways of implementing and configuring a recommender, and to evaluate your different approaches. Start with an existing dataset of user-item ratings, such as our toy books dataset, MovieLens, Jester [http://eigentaste.berkeley.edu/dataset/] or another dataset of your choosing.  
+
+Implement at least two of these recommendation algorithms:  
++ Content-Based Filtering  
++ User-User Collaborative Filtering  
++ Item-Item Collaborative Filtering  
+
+You should evaluate and compare different approaches, using different algorithms, normalization techniques, similarity methods, neighborhood sizes, etc. You don’t need to be exhaustive—these are just some suggested possibilities.  
+
+You may use the course text’s `recommenderlab` or any other library that you want.
+Please provide at least one graph, and a textual summary of your findings and recommendations.  
+
+***
+
+#### Building a Recommender System
+
+***
+
+**Loading packages and the MovieLense dataset**  
+
+Similar to our `Building a Recommendation System with R` book, I'll use the `MovieLense` dataset for this project. In order to access this data, we'll need to load the `recommenderlab` package and the `MovieLense` data stored within this package.
+
+```{r, warning=FALSE, message=FALSE}
+require(recommenderlab)
+require(ggplot2)
+data("MovieLense")
+class(MovieLense)
+require(knitr)
+require(kable)
+require(kableExtra)
+require(devtools)
+require(tidyverse)
+require(dplyr)
+require(stats)
+```
+***
+
+#### Data Exploration
+
+Before we start to build out our recommender systems, we can do some basic data exploration to get a better handle of our ratings. First, we can show the dimensions of our user-item matrix:  
+
+```{r}
+dim(MovieLense)
+```
+As we can see, there are 943 users and 1164 movies in this dataset. From this, we can see that there are 1,569,152 possible user-item combinations (943 * 1664).  
+
+We can also take a look at the frequency of ratings for all movies on a 1-5 scale, with 0 indicating movies that the user has not seen.
+
+```{r}
+vector_ratings <- as.vector(MovieLense@data)
+
+table_ratings <- table(vector_ratings)
+table_ratings
+```
+From our table above, we can see that a large majority of movies are unrated by users (which is to be expected). However, there is also a pretty substantial number of ratings that we can use later to continue to build out our recommendations.
+
+Now, we can filter out all of the values equal to 0 to isolate only user-item combinations that only show ratings for movies:  
+```{r}
+vector_ratings <- vector_ratings[vector_ratings != 0]
+```
+
+Then, we can create a quick histogram to see how users are typically rating the 1,664 movies.
+```{r, fig.width=5, fig.height=4, echo=FALSE}
+vector_ratings <- factor(vector_ratings)
+
+qplot(vector_ratings) + ggtitle("Distribution of the ratings")
+```
+\br
+
+From the histogram above, we can see that a large majority of ratings fall in the 3 to 5 range, with 4 being the most common rating for all movies.
+
+**Visualizing the matrix**
+
+We can also use the `image` function in the `recommenderlab` package to help visualize the user-item matrix. To do this, we can generate an image below of a small subset of our larger matrix. Here, I subsetted to show 48 users and their ratings for the first 82 movies in the matrix:  
+
+```{r, echo=FALSE}
+image(MovieLense[1:48, 1:82], main = "Heatmap of subset of users and movies")
+```
+\br
+
+Later on, we'll be utilizing our user-item matrix to generate recommendations on a test set of data. However, it'll be important that we utilize ratings and data from non-sparse samples of our training set in order to do so. As an example, we can find the top five percent of users and movies in our matrix.
+
+```{r}
+min_n_movies <- quantile(rowCounts(MovieLense), 0.95)
+min_n_users <- quantile(colCounts(MovieLense), 0.95)
+
+
+image(MovieLense[rowCounts(MovieLense) > min_n_movies, colCounts(MovieLense) > min_n_users], main = "Heatmap of top 5% of users and movies")
+```
+\br
+
+We can quickly see here that this is much less sparse (less white squares), than our previous matrix that just showed a random set of user-item combinations.
+
+
+**Average Ratings**  
+
+We can also take a look at the average ratings of movies across all of our movies:  
+
+```{r, message=FALSE, echo=FALSE}
+average_ratings <- colMeans(MovieLense)
+
+qplot(average_ratings) + stat_bin(binwidth = 0.1) + ggtitle("Distribution of average movie ratings")
+```
+\br
+
+As mentioned in the textbook, there are a few movies that are rated quite low in this distribution (around 1), and a few that are rated quite high (around 5) -- for these instances, this would likely indicate that there is a small sample size that could potentially be skewing these averages. Therefore, to account for this, we can subset our data to only include movies that have been viewed/rated by at least 100 users:  
+
+```{r}
+views_per_movie <- colCounts(MovieLense)
+average_ratings_update <- average_ratings[views_per_movie >= 100]
+```
+
+We can now re-run our histogram:  
+
+```{r, message=FALSE, echo=FALSE}
+qplot(average_ratings_update) + stat_bin(binwidth = 0.1) + ggtitle("Distribution of average movie ratings (subset)")
+```
+\br
+
+We can see that this is a bit cleaner, and shows a more normal distribution, removing movies that had uncharacteristically low or high ratings.
+
+***
+
+#### Data Preparation
+
+Similar to earlier, we'll need to select the most relevant data in order to set ourselves up well to build our recommenders. The items that we will need to account for:  
+
++ Ensure that we do not have movies in our training dataset that have been viewed only a few times (this could lead to biased ratings for these movies due to lack of data)  
+
++ Ensure that we do not have users in our training dataset that only rated a few movies, since their ratings might be biased and we wouldn't be able to generate reliable similarities with other users.  
+
+
+**Establishing a threshold**  
+
+In order to account for these two items above, we'll start with a generic threshold that is similar to our textbook. Our ratings matrix will include only those that meet the following thresholds:  
+
++ Users who have rated at least 50 movies  
++ Movies that have been watched at least 100 times (have at least 100 ratings)  
+
+Therefore, we can filter out data by using the following syntax:  
+
+```{r}
+min_n_movies <- 50
+min_n_users <- 100
+
+ratings_movies <- MovieLense[rowCounts(MovieLense) > min_n_movies, colCounts(MovieLense) > min_n_users]
+
+ratings_movies
+```
+
+Our ratings matrix is now much smaller, reducing it from its initial list of 943 users to 560 users, and 1,664 moves to 332 movies. Although this subsets the matrix by quite a lot, we'll still be able to generate reliable recommendations from such a large dataset.
+
+**Visualizing the top 5 percent of users and movies in the new matrix**  
+
+```{r}
+min_movies <- quantile(rowCounts(ratings_movies), 0.95)
+min_users <- quantile(colCounts(ratings_movies), 0.95)
+
+
+image(ratings_movies[rowCounts(ratings_movies) > min_movies, colCounts(ratings_movies) > min_users])
+```
+
+
+**A quick note on normalization**
+
+Before progressing, we need to take a look at the average ratings across our different users. It'll be helpful to normalize the ratings in order to limit bias -- users who repeatedly give high (or low) ratings might bias recommendations. Fortunately, the `recommenderlab` package, and the `Recommender` function already does this for us. However, I'll quickly demonstrate one way to normalize our data, to center each user's ratings at zero. We can normalize the ratings by using the `normalize` function in R:  
+
+```{r}
+ratings_movies_norm <- normalize(ratings_movies)
+```
+
+This creates a matrix where the ratings are transformed from a 1 to 5 rating scale, to a -5 to 5 rating scale. We can see this in the updated image of the matrix below:  
+
+```{r}
+image(ratings_movies_norm[rowCounts(ratings_movies_norm) > min_movies, colCounts(ratings_movies_norm) > min_users])
+```
+\br
+
+Although we are seeing a fair amount of ratings that are darker red and blue, indicating that they are farther away from our average of 0, we can confirm that our average rating by user is now zero given our `normalize` function:  
+
+```{r}
+round(sum(rowMeans(ratings_movies_norm)), 2)
+```
+After doing a bit of data exploration, and working through normalization, we can run our first recommender algorithm.
+
+***
+
+#### Algorithm #1: Item-Item collaborative filtering (IBCF)
+
+For our first algorithm, we'll use an Item-based collaborative filtering method to measure similarities between movies. We can then use these similarity metrics to recommend similar movies to users based on a user's previous ratings.
+
+To do this, we first need to set up the training and testing sets. I'll do this manually below, however in future projects we can utilize the built-in functions from the `recommenderlab` package to do this:
+
+```{r}
+set.seed(123)
+
+training_cast <- sample(x = c(TRUE, FALSE), size = nrow(ratings_movies), replace = TRUE, prob = c(0.8, 0.2))
+
+head(training_cast)
+```
+After setting a seed to keep our sample function output consistent across multiple runs of our code, we can then take the rows in our user-item matrix and do an 80/20 training to testing split. The output shows the first 5 values of our vector, that we'll then use to filter out our ratings_movies matrix into our training and testing datasets.  
+
+```{r}
+training_data <- ratings_movies[training_cast]
+testing_data <- ratings_movies[!training_cast]
+
+dim(training_data)
+dim(testing_data)
+```
+We can see above that our datasets have been split to include 452 users and their corresponding ratings in the training dataset, and 108 users and their corresponding ratings in the testing dataset.  
+
+Now, we can use the built-in `Recommender` function in the `recommenderlab` package to run our first IBCF model.  
+
+```{r, warning=FALSE}
+ibcf <- Recommender(data = training_data, method = "IBCF", parameter = list(method="cosine", k=30, normalize = "center"))
+```
+
+After setting our parameters to do the following:  
+
++ Use our training data for our model  
++ Utilize an IBCF model to create a reduced similarity matrix  
++ Setting k equal to 30 to compute k-most similar items (30 in our initial case) for each item.  
++ Utilize Cosine Similarity for our method of measuring similarity    
+
+We can then take a look at some of the details of the IBCF model that we ran:  
+```{r}
+ibcf_details <- getModel(ibcf)
+dim(ibcf_details$sim)
+```
+As expected, our model generated a square similarity matrix that is 332 rows by 332 columns. This matrix computes the Cosine Similarity for each pair of movies. The model then used this matrix to store the k most similar movies to each pair of movies.  
+
+As you can see from below, each row has 30 elements that are greater than 0 (shaded in gray boxes). As mentioned in the textbook, the number of gray boxes doesn't necessary equal 30 going down a column, given that column counts depend on how many times the corresponding movie was included in the top 30 list of other movies.
+
+```{r, fig.width=14, fig.height=14, echo=FALSE}
+image(ibcf_details$sim)
+```
+\br
+
+To show this distribution across columns, we can create a histogram:  
+
+```{r, message=FALSE, echo=FALSE}
+col_sums <- colSums(ibcf_details$sim > 0)
+qplot(col_sums) + stat_bin(binwidth = 1) + ggtitle("Distribution of column count")
+```
+\br 
+
+As we can see from this distribution, there are a few movies that are similar to most others, with column sums greater than 100 (meaning that they were neighbors to more than 100 other movies based on their Cosine Similarity scores).  
+
+We can isolate the top six movies that are most similar to all others in the following dataframe:  
+
+```{r, echo=FALSE}
+col_sums_df <- as.data.frame(col_sums)
+col_sums_df %>% 
+  arrange(desc(col_sums)) %>% 
+  head(n = 6) %>% 
+  kable() %>%
+  kable_styling(head(col_sums_df), bootstrap_options = "striped", full_width = FALSE)
+```
+
+**Applying model to the test set** 
+
+With our model trained on our training dataset, we can now apply it to our test dataset of users. We'll set `n_recommended` equal to six to recommend six movies to each user:  
+
+```{r}
+n_recommended <- 6
+ibcf_predictions <- predict(object = ibcf, newdata = testing_data, n = n_recommended)
+```
+
+We now have recommendations for each user in our test set! We can save these in a matrix:  
+
+```{r}
+recc_matrix_ibcf <- sapply(ibcf_predictions@items, function(x){
+  colnames(ratings_movies)[x]
+})
+```
+
+As an example of our output, the first user in our test set would have these six movies as recommendations:  
+```{r}
+recc_matrix_ibcf[, 1]
+```
+
+Now, in order to identify the most recommended movies from our IBCF model, we can create a histogram:  
+
+```{r, echo=FALSE}
+most_rec_movies_ibcf <- factor(table(recc_matrix_ibcf))
+
+qplot(most_rec_movies_ibcf) + ggtitle("Distribution of movie recommendations for IBCF") + xlab("Number of times recommended") + ylab("Number of movies")
+```
+\br
+
+From above, we can see that a large majority of movies were only recommended to users 1 or 2 times.  
+
+The movies that are very far to the right on our distribution, ones that have been recommended to users at least 9 times, are the following:  
+
+```{r, echo=FALSE}
+num_times_rec_ibcf <- as.data.frame(most_rec_movies_ibcf)
+
+num_times_rec_ibcf %>% 
+  arrange(desc(most_rec_movies_ibcf)) %>% 
+  head(n=5) %>% 
+  kable() %>% 
+  kable_styling(bootstrap_options = 'striped', full_width = FALSE)
+```
+
+**Running our IBCF model again, while calculating error**  
+
+Although we have effectively run our IBCF model above and generated movie recommendations for each user in our test dataset, it's difficult for us to determine how effective our recommendations are to our users. Therefore, I'm going to go back through and run the IBCF model multiple times (utilizing different neighborhood sizes and additional parameters), and taking into consideration error calculations in order to identify the optimal IBCF model on our dataset. We can utilize many of our built-in `recommenderlab` functions in order to do this.  
+
+We can step back and utilize our already subsetted data `ratings_movies` to set up our evaluation scheme. This time, instead of splitting our data into an 80/20 training and testing dataset, I'll use cross-validation (10-fold), to create 10 equal test sets -- this was recommended in our textbook. Additionally, we can indicate a 'good rating' is equal to 3:  
+
+```{r}
+e <- evaluationScheme(ratings_movies, method = "cross-validation", k=10, given=10, goodRating=3)
+```
+
+Then, similar to week one, we can utilize error calculations such as Root Mean Squared Error (RMSE), Mean Squared Error (MSE), and Mean Absolute Error (MAE) to determine how good our model(s) are at providing effective movie recommendations to users.
+
+Instead of running our model in pieces as we did earlier, I'll combine it into one function called `errorOptimization` and will do the following:  
+
++ use the `Recommender` function with the given parameters to create the recommender model  
++ use the model to make predictions on the test set  
++ use the `calcPredictionAccuracy` function to calculate the RMSE, MSE, and MAE  
++ store these errors in a vector to later use for visualizations and evaluation    
+
+Here's the structure:  
+```{r}
+errorOptimization <- function(evalScheme, similarity_calc, neighborhood_size, normalization_techniques, algorithm_type, k_or_nn){
+  
+  # build the recommender model
+ recommender <- Recommender(getData(e, 'train'), algorithm_type, parameter= list(method = similarity_calc, k = neighborhood_size, normalize = normalization_techniques))
+ 
+ # create the predictions on the test set using the model
+ predictions <- predict(recommender, getData(e, 'known'), type='ratings')
+ 
+ # compute error metrics averaged per user and then averaged over all
+ error <- calcPredictionAccuracy(predictions, getData(e, "unknown"))
+ 
+ # store these computations in an error vector
+ error_vector <- c(error, similarity_calc, neighborhood_size, normalization_techniques)
+ 
+ # create headers for the vector
+ names(error_vector) <- c('RMSE', 'MSE', 'MAE', 'similarity_calc', 'neighbors', 'norm')
+ 
+ return(error_vector)
+
+}
+```
+
+Now, with the function ready to go, I thought it would be interesting to see what happens to our error values given our different parameters. By creating vectors with our different parameter options (and the different types of similarity calculations, neighborhood sizes and normalization techniques we can use), I'll do my best to incorporate them all into one data frame that we can use to see which is optimal to create our recommendations:  
+
+```{r}
+neighborhood_size <- seq(5, 100, 1)
+normalization_techniques <- c('center', 'Z-score')
+similarity_calcs <- c('cosine', 'pearson')
+algorithm_type <- 'ibcf'
+
+# create empty vector
+errors_list <- c()
+
+# cycle through the similarity, neighbor, and normalization vectors, append errors to empty vector  
+for (s in similarity_calcs){
+  for(k in neighborhood_size){
+    for(n in normalization_techniques){
+      errors_list <- rbind(errors_list, errorOptimization(e, s, k, n, algorithm_type))
+    }
+  }
+}
+
+# change the data types of the error values from characters to numbers
+errors_df <- as.data.frame(errors_list)
+errors_df$RMSE <- as.numeric(as.character(errors_df$RMSE))
+errors_df$MSE <- as.numeric(as.character(errors_df$MSE))
+errors_df$MAE <- as.numeric(as.character(errors_df$MAE))
+
+errors_df$AVG_ERROR <- rowMeans(subset(errors_df, select=c(RMSE, MSE, MAE)))
+```
+
+
+***
+
+#### Visualizing our Error 
+
+Based on the different parameters and techniques included above, we can visualize our error values for using our normalization technique of 'center' (blue) and 'z-score' (red) to see which yielded higher errors:  
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+errors_df_center <- errors_df %>% 
+  filter(norm == 'center')
+
+errors_df_zscore <- errors_df %>% 
+  filter(norm != 'center')
+
+
+normalization_df <- data.frame(`center` = errors_df_center$AVG_ERROR, `zscore` = errors_df_zscore$AVG_ERROR, sim_calc = errors_df_center$similarity_calc)
+
+ggplot(normalization_df, aes(1:nrow(errors_df_center))) + 
+  geom_line(aes(y=normalization_df$`center`), color="blue") +
+  geom_line(aes(y=normalization_df$`zscore`), color="red") +
+  ylab("Average Error (RMSE, MSE, MAE)") +
+  xlab("Model runs") +
+  ggtitle("Average Error by Normalization Technique")
+```
+\br
+
+Based on the different parameters and techniques included above, we can visualize our error values for using our similarity functions of 'cosine' (blue) and 'pearson' (red) to see which yielded higher errors: 
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+errors_df_cosine <- errors_df %>% 
+  filter(similarity_calc == 'cosine')
+
+errors_df_pearson <- errors_df %>% 
+  filter(similarity_calc != 'cosine')
+
+
+sim_calc_df <- data.frame(`cosine` = errors_df_cosine$AVG_ERROR, `pearson` = errors_df_pearson$AVG_ERROR)
+
+ggplot(sim_calc_df, aes(1:nrow(sim_calc_df))) + 
+  geom_line(aes(y=sim_calc_df$`cosine`), color="blue") +
+  geom_line(aes(y=sim_calc_df$`pearson`), color="red") +
+  ylab("Average Error (RMSE, MSE, MAE)") +
+  xlab("Model runs") +
+  ggtitle("Average Error by Similarity Function")
+```
+\br
+
+From our visuals above, it looks like our similarity calculation using the pearson method may be more effective. However, it doesn't look like either normalization technique is particularly more effective for our IBCF model. Now, we can find our optimal IBCF model by finding the minimum AVG_ERROR value across all of our model runs:  
+
+```{r, echo=FALSE}
+errors_df %>% 
+  filter(AVG_ERROR == min(errors_df$AVG_ERROR)) %>% 
+  kable() %>% 
+  kable_styling(bootstrap_options = 'striped', full_width = FALSE)
+```
+
+
+We can now utilize these values later on to compare against our the error outputs of our second algorithm, a User-Based Collaborative Filtering method.
+
+***
+
+#### Algorithm #2: User-User collaborative filtering (UBCF)
+
+Utilizing our same function above, we can adjust the `Recommender` parameter from 'ibcf' to 'ubcf', while continuing the same cross-validation processes and calculations. However, this time, instead of identifying similar movies that have been seen and rated by the same people, and then recommending movies to new users based on these similarity ratings and past user ratings, we'll be taking the following approach:  
+
++ Measure the similarities in ratings across users, utilizing the same techniques as IBCF, including pearson and cosine similarity  
++ Identify the most similar users, utilizing k-nearest neighbors, after identifying a proper threshold (the number of ratings given by each user)  
++ Rate the movies by the most similar users, calculating the rating as the average rating among similar users by determining these two factors:
+  + Average rating by these similar users    
+  + Weighted average rating, using the similarities as weights  
++ Select the top-rated movies 
+
+We'll use the same training/testing dataset from earlier for this initial run:
+
+```{r}
+ubcf <- Recommender(training_data, method='ubcf', parameter= list(method = 'cosine', nn = 10, normalize = 'center'))
+```
+
+
+**Applying model to the test set**  
+
+After this, we can use our model to make predictions on our test dataset from earlier:  
+
+```{r}
+ubcf_predictions <- predict(ubcf, testing_data, n_recommended)
+```
+
+We now have recommendations for each user in our test set! We can save these in a matrix:  
+
+```{r}
+recc_matrix_ubcf <- sapply(ubcf_predictions@items, function(x){
+  colnames(ratings_movies[,x])
+})
+```
+
+As an example, the first user in our test set would have these six movies as recommendations:  
+```{r}
+recc_matrix_ubcf[,1]
+```
+
+
+Now, in order to identify the most recommended movies from our UBCF model, we can create a histogram:  
+
+```{r, echo=FALSE}
+most_rec_movies_ubcf <- factor(table(recc_matrix_ubcf))
+
+qplot(most_rec_movies_ubcf) + ggtitle("Distribution of movie recommendations for UBCF") + xlab("Number of times recommended") + ylab("Number of movies")
+```
+\br
+
+Interestingly, we can see that the UBCF model seems to be recommending the same movies to a broader set of users (more frequently), than the distribution we saw from the IBCF model.  
+
+We can check the most frequently recommended movies from our UBCF model:  
+
+
+```{r, echo=FALSE}
+num_times_rec_ubcf <- as.data.frame(most_rec_movies_ubcf)
+
+num_times_rec_ubcf %>% 
+  arrange(desc(most_rec_movies_ubcf)) %>% 
+  head(n=5) %>% 
+  kable() %>% 
+  kable_styling(bootstrap_options = 'striped', full_width = FALSE)
+```
+As we can see here, movies such as *Good Will Hunting* and *Titanic* were recommended much more frequently to users than they were in the IBCF model.  
+
+
+**Running our UBCF model again, while calculating error**  
+
+Similar to the approach with IBCF, we'll rerun the UBCF model to make a better determination of whether or not this model is effective at providing recommendations of movies to users. Therefore, I'm going to go back through and run the UBCF model multiple times utilizing the function we created earlier `errorOptimization()`.  
+
+We'll use the same evaluation scheme as earlier, with cross-validation (10-fold), to create 10 equal test sets. Additionally, we can indicate a 'good rating' is equal to 3. Next, we can use our training data from our evaluation scheme to generate our ubcf model:
+
+```{r, echo=FALSE}
+
+errorOptimization <- function(evalScheme, similarity_calc, neighborhood_size, normalization_techniques, algorithm_type, k_or_nn){
+  
+  # build the recommender model
+ recommender <- Recommender(getData(e, 'train'), algorithm_type, parameter= list(method = similarity_calc, nn = neighborhood_size, normalize = normalization_techniques))
+ 
+ # create the predictions on the test set using the model
+ predictions <- predict(recommender, getData(e, 'known'), type='ratings')
+ 
+ # compute error metrics averaged per user and then averaged over all
+ error <- calcPredictionAccuracy(predictions, getData(e, "unknown"))
+ 
+ # store these computations in an error vector
+ error_vector <- c(error, similarity_calc, neighborhood_size, normalization_techniques)
+ 
+ # create headers for the vector
+ names(error_vector) <- c('RMSE', 'MSE', 'MAE', 'similarity_calc', 'neighbors', 'norm')
+ 
+ return(error_vector)
+
+}
+
+```
+
+
+```{r}
+similarity_calcs <- c('cosine', 'pearson')
+neighborhood_size <- seq(5, 100, 1)
+normalization_techniques <- c('center', 'Z-score')
+algorithm_type <- 'ubcf'
+
+# create empty vector
+errors_list_ubcf <- c()
+
+# cycle through the similarity, neighbor, and normalization vectors, append errors to empty vector  
+for (s in similarity_calcs){
+  for(k in neighborhood_size){
+    for(n in normalization_techniques){
+      errors_list_ubcf <- rbind(errors_list_ubcf, errorOptimization(e, s, k, n, algorithm_type))
+    }
+  }
+}
+
+# change the data types of the error values from characters to numbers
+errors_df_ubcf <- as.data.frame(errors_list_ubcf)
+errors_df_ubcf$RMSE <- as.numeric(as.character(errors_df_ubcf$RMSE))
+errors_df_ubcf$MSE <- as.numeric(as.character(errors_df_ubcf$MSE))
+errors_df_ubcf$MAE <- as.numeric(as.character(errors_df_ubcf$MAE))
+
+errors_df_ubcf$AVG_ERROR <- rowMeans(subset(errors_df_ubcf, select=c(RMSE, MSE, MAE)))
+```
+
+
+**Visualizing Error**  
+
+With our errors calculated across many runs of the UBCF model, we can generate our visuals again of a few parameters:  
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+errors_df_center_ubcf <- errors_df_ubcf %>% 
+  filter(norm == 'center')
+
+errors_df_zscore_ubcf <- errors_df_ubcf %>% 
+  filter(norm != 'center')
+
+
+normalization_df_ubcf <- data.frame(`center` = errors_df_center_ubcf$AVG_ERROR, `zscore` = errors_df_zscore_ubcf$AVG_ERROR, sim_calc = errors_df_center_ubcf$similarity_calc)
+
+ggplot(normalization_df_ubcf, aes(1:nrow(errors_df_center_ubcf))) + 
+  geom_line(aes(y=normalization_df_ubcf$`center`), color="blue") +
+  geom_line(aes(y=normalization_df_ubcf$`zscore`), color="red") +
+  ylab("Average Error (RMSE, MSE, MAE)") +
+  xlab("Model runs") +
+  ggtitle("Average Error by Normalization Technique")
+```
+```{r, message=FALSE, warning=FALSE}
+errors_df_cosine_ubcf <- errors_df_ubcf %>% 
+  filter(similarity_calc == 'cosine')
+
+errors_df_pearson_ubcf <- errors_df_ubcf %>% 
+  filter(similarity_calc != 'cosine')
+
+
+sim_calc_df_ubcf <- data.frame(`cosine` = errors_df_cosine_ubcf$AVG_ERROR, `pearson` = errors_df_pearson_ubcf$AVG_ERROR)
+
+ggplot(sim_calc_df_ubcf, aes(1:nrow(sim_calc_df_ubcf))) + 
+  geom_line(aes(y=sim_calc_df_ubcf$`cosine`), color="blue") +
+  geom_line(aes(y=sim_calc_df_ubcf$`pearson`), color="red") +
+  ylab("Average Error (RMSE, MSE, MAE)") +
+  xlab("Model runs") +
+  ggtitle("Average Error by Similarity Function")
+```
+
+\br
+
+Similar to evaluation of our error values for IBCF, it looks like our similarity calculation using the pearson method may be more effective for UBCF, too. Also, it doesn't look like either normalization technique is particularly more effective for our UBCF model. Now, we can find our optimal model by finding the minimum AVG_ERROR value across all of our model runs:  
+
+```{r, echo=FALSE}
+errors_df_ubcf %>% 
+  filter(AVG_ERROR == min(errors_df_ubcf$AVG_ERROR)) %>% 
+  kable() %>% 
+  kable_styling(bootstrap_options = 'striped', full_width = FALSE)
+```
+
+***
+
+#### Summary 
+
+After utilizing Item-Item and User-User Collaborative Filtering algorithms, I was able to generate movie recommendations for each user based on our original user-item matrix from the `MovieLense` dataset. Following a bit of data exploration, I tidy'd the data in order to get it ready to run through my algorithms. I briefly discussed normalization of ratings, and ran through ways to split the Large realRatingMatrix into a training and test dataset. Finally, I utilized the `recommenderlab` package to generate my models, and computed error to measure the effectiveness of both algorithms and their subsequent recommendations. Here are a few things I noticed:  
+
++ Similar to many user-item matrices, the MovieLense data was quite sparse, so it was important to create a threshold that would subset the sparse matrix to limit bias.  
+
++ Both models generated movie recommendations, and it was interesting to see that each algorithm recommended quite different movies for each user -- there didn't seem to be too much consistency in recommendations across the two methods. Albeit, more in-depth investigation is needed to calculate specific differences, it was interesting to see that the UBCF model recommended some of the same movies more frequently over a larger subset of users than the IBCF model, which recommended the same movies less frequently across users.  
+
++ I noticed that when I was running error calculations on both models, the normalization technique, whether it was 'center' or 'z-score' didn't tend to show major differences in error.  
+
++ I also noticed that when running error calculations on both models, the similarity function used did tend to show differences in error -- the pearson correlation method seemed to yield lower error than the cosine method for both algorithms.  
+
++ Our k-nearest neighbors inputs seemed to show lower error with higher values, which we could see clearly from our plots. Additionally, both of our lowest error values for our IBCF and UBCF algorithms had neighbor values of 100 and 98 respectively, indicating that the larger number of neighbors were more effective for the MovieLense data when computing similarity measures.
+
++ Ultimately, after computing my final error values by averaging the RMSE, MSE, and MAE values, and then taking the lowest average error value across the two algorithms, it appears that the User-User Collaborative Filtering model generated recommendations with lower error. This is something that I hope to explore further in future weeks, since we can do further evaluation on both of these models (plot ROC curves, calculate precision-recall, etc.), but for now, it looks like there were substantial differences in my error outputs between the two techniques.
+
+Overall, this my first time building a recommender system, and it was interesting to dive in using both of these techniques!
