@@ -37,6 +37,7 @@ require(tidyverse)
 require(dplyr)
 require(stats)
 require(irlba)
+require(rsvd)
 ```
 ***
 
@@ -48,31 +49,39 @@ Similar to last week, before we implement a matrix factorization method, we can 
 dim(MovieLense)
 ```
 As we can see, there are 943 users and 1164 movies in this dataset. From this, we can see that there are 1,569,152 possible user-item combinations (943 * 1664).  
+
 Next, we can check the sparsity of the dataset by running the following calculation:  
 
 ```{r}
-movie_matrix <- as.matrix(MovieLense@data)
+movie_matrix_orig <- as.matrix(MovieLense@data)
 
-length(movie_matrix[movie_matrix==0]) / (ncol(movie_matrix)*nrow(movie_matrix))
+length(movie_matrix_orig[movie_matrix_orig==0]) / (ncol(movie_matrix_orig)*nrow(movie_matrix_orig))
 ```
-As we can see above, the matrix is quite sparse, with a large majority (about 94% of user-item ratings) with a rating of zero, which in this instance indicates that there is no rating. Before running our matrix factorization method, we'll need to confirm that there are no missing values.
+As we can see above, the matrix is quite sparse, with a large majority (about 94% of user-item ratings) with a rating of zero, which in this instance indicates that there is no rating. Before running our matrix factorization method, we'll need to handle our missing values.
 
 ***
 
 **Missing values in MovieLense Data**
 
-Fortunately, the `MovieLense` dataset does not have any missing values, and all missing ratings are recoded to zero. Therefore, we can continue to move on and conduct our singular value decomposition on our movie matrix.
+In the `MovieLense` dataset, the missing values have been imputed to zero. For our purposes, this is not ideal, since this would greatly alter our singular value calculations later. Therefore, we will create a matrix that converts our missing values from zero to NA, and then impute the missing values with the row mean for each user. This way, we can have a value for each user-movie combination in our matrix, and our matrix will be ready for SVD and dimensionality reduction:    
 
-# ```{r}
-# movie_matrix <- as.matrix(normalize(MovieLense)@data)
-# ```
-# 
+```{r}
+# creating movie_matrix replacing zeros with NAs
+movie_matrix <- movie_matrix_orig
+is.na(movie_matrix) <- movie_matrix == 0
+
+# imputing all missing values to the row mean
+k <- which(is.na(movie_matrix), arr.ind=TRUE)
+movie_matrix[k] <- rowMeans(movie_matrix, na.rm=TRUE)[k[,1]]
+```
+
+With our `movie_matrix` now containing imputed values for our missing data, we can start SVD.
 
 ***
 
 **Singular Value Decomposition (SVD)**
 
-In order to work through our SVD calculations, we'll need to keep in mind the following functions:  
+In order to work through our SVD calculations, we'll need to keep in mind the following equation:  
 
 $$M = U \Sigma V^{T} $$
 with $M$ as our original $m \times n$ matrix, $U$ as our unitary matrix ($m \times m$), $\Sigma$ as our diagonal matrix ($m \times n$), and $V^{T}$ as our complex unitary matrix ($n \times n$).  
@@ -92,65 +101,107 @@ d <- svd_M$d
 
 item_profile <- U %*% sqrt(S)
 user_profile <- sqrt(S) %*% v_tran
-item_user_profile <- round((item_profile %*% user_profile), 0)
+item_user_profile <- item_profile %*% user_profile
+
+rownames(item_user_profile) <- rownames(movie_matrix)
+colnames(item_user_profile) <- colnames(movie_matrix)
+
 ```
 
 Check to see if our `item_user_profile` matrix is equal to our original `movie_matrix`. 
 ```{r}
-all(item_user_profile == movie_matrix)
+round(max(abs(Matrix(item_user_profile) - movie_matrix)), 0)
 ```
 
-As we can see, this is indeed true.  
+As we can see, this is indeed true given that the difference between the two matrices is zero.  
 
-Now, given this method, we can perform dimensionality reduction to create approximate ratings from our original item-user matrix. The reason we would do this is to cut down on the size of our original movie matrix, which at this point with the dimensions of 943 by 1664 is quite large. We can modify the rank of this large matrix, which at this point is $r = 943$, and reduce it to a rank of $k$, in which $k < r$.  
+Now, given this method, we can perform dimensionality reduction to create approximate ratings from our original item-user matrix. The reason we would do this is to cut down on the size of our original movie matrix, which at this point with the dimensions of 943 by 1664, is quite large. We can modify the rank of this matrix, $r = 943$, and reduce it to a rank of $k$, in which $k < r$.  
 
 ```{r}
 rankMatrix(movie_matrix)[1]
 ```
-From above, we can check that our `movie_matrix` is indeed currently rank $r=943$. We will reduce this to a more optimal rank, in order to make our recommender more efficient.
+From above, we can check that our `movie_matrix` is indeed currently rank $r=943$. We will reduce this to a lower rank matrix, in order to make our recommender more efficient, and to allow us to use smaller matrices to make predictions.
 
 To do this, we can follow the steps outlined in the [YouTube](https://www.youtube.com/watch?v=yLdOS6xyM_Q) resources provided for this week's materials.  
 
-First, we'll need to find our optimal $k$ value from our $d$ singular values, which were computed from our original `movie_matrix`, and organized from greatest to least. Given there were 943 singular values computed from our original matrix during SVD (which matches our initial rank of 943), in practice, we'll reduce the dimensions of our matrix by converting very small singular values to zero in our $d$ vector. To start, we can plot our singular values:  
+First, we'll need to find our optimal $k$ value from our $d$ singular values, which were computed from our original `movie_matrix`, and organized from greatest to least. Given there were 943 singular values computed from our original matrix during SVD (which matches our initial rank of 943), in practice, we'll reduce the dimensions of our matrix by converting very small singular values to zero in our $d$ vector. To start, we can plot our singular values of our full rank matrix of 943:  
 
 ```{r, fig.height=4, fig.width=8}
-hist(d, breaks = 100, xlab="singular value", ylab="frequency in d", main = "Histogram of singular values")
+hist(d, breaks = 25, xlab="singular value", ylab="frequency in d", main = "Histogram of singular values")
 ```
 
-As we can see above, many of our singular values fall close to zero, with only a few values falling above 100. To effectively reduce the dimensions of our matrices, we can convert many of these values that are close to zero to zero (and thus removing them from our matrices in $V$ and $U$), since they won't likely hold much weight in our final predictions of ratings. We can actually find the optimal k value by running the following syntax using the `irlba` package and function.  
+As we can see above, many of our singular values fall close to zero (with one really large value -- 4,528). To effectively reduce the dimensions of our matrices, we can convert many of these values that are close to zero, to zero (and thus remove them from our matrices in $V$ and $U$ when doing SVD), since they won't likely hold much weight in our final predictions of ratings. We can actually find the optimal k value by utilizing the following functions:  
 
-Unlike the `svd` function used earlier, the `irlba` function returns a number of estimated singular values equal to the maximum of the number of specified singular vectors $nu$ and $nv$ (in our case we used 100 to start). The `svd` package always returns a complete set of singular values, which is good for many things, but for our purposes in dimensionality reduction, the `irlba` function really comes in handy here:
 
+In order to find the optimal k, we'll need to first compute the sum of all squares of singular values in our original movies dataset:
 ```{r}
-svd_trunc <- irlba(movie_matrix, nu=100, nv=100)
-d_trunc <- svd_trunc$d
-plot(d_trunc, xlab="rank", ylab="singular value")
+ss_all <- sum((d)^2)
 ```
 
-From our plot of truncated singular values above, we can see that many of our highest singular values (features), and hence most important for our predictions, are around a matrix rank of about 65. After 65, these values start to trail off. Now, we can re-run our decomposition using the `irlba` package so that we obtain a $k=65$, instead of our previous $k=100$.  
+Then, we can find the optimal $k$ by making sure we are keeping at least 80-90% total energy of our singular values vector for prediction. This is based on our formula:  
+
+$$\frac{\sum\limits_{i}^k \sigma_{i}^2}{\sum\limits_{i}^r \sigma_{i}^2} \leq 0.9$$
+
+
+We can plot this out in a graph and see where we reach our minimum energy threshold of 90%:  
 
 ```{r}
-svd_opt <- irlba(movie_matrix, nu=65, nv=65)
+energy <- NULL
+for (i in 1:length(d)) {
+  energy[i] <- sum(d[1:i]^2) / ss_all
+}
+
+plot(energy, pch=20, cex = 0.5, xlab='# of singular values', ylab='Percent sum of squares of singular values', main = "Dimensionality Reduction - optimal k")
+lines(x = c(0,20), y = c(.9961, .9961))
+lines(x = c(20,20), y = c(0, .9961))
+```
+
+From our plot of truncated singular values above, we can see that many of our highest singular values (features), and hence most important for our predictions, fall within our optimal range of preserving at least 90% of the energy. Therefore, to make it as computationally efficient as possible, we'll with a very low rank matrix of 20. We can always go back and adjust our $k$ value if a rank-20 matrix yields high error, but for now, we can test this size. Therefore, we can re-run our decomposition using the `irlba` package instead of the `svd` package, since by default, the `irlba` package returns the given rank $k$ matrix instead of the full rank matrix, which the `svd` function does. After running the functions below, we'll effectively reduce the dimensions of our full matrix from $r=943$ to $k=20$ -- a huge improvement.  
+
+```{r}
+svd_opt <- irlba(movie_matrix, nu=20, nv=20)
 d_opt <- svd_opt$d
-plot(d_opt)
+plot(d_opt, pch=20, cex = 0.75, xlab='rank (k)', ylab='singular value')
 ```
+Above, we can see our spread of singular values with rank $k=20$ of our diagonal matrix.  
 
-Now, with our optimal $k$ value, we can re-compute our item-profile matrix under a much smaller dimension:  
 ```{r}
-sum((d_opt)^2)/sum((d)^2)
+data.frame(d_opt)
 ```
 
-$$M = U \Sigma V^{T} $$
 
+Now, with our optimal $k$ value, we can re-compute our item-user matrix under a much smaller dimension using our updated equation:  
+
+$$A_k=U_kS_kV^T_k $$
+Where $A$ is our updated item-user matrix with rank = $k$, using $U$, $S$, and $V^T$ all at rank = $k$ as well. This equation above is expanded to:  
+
+$$A_k=(U_k \sqrt\Sigma_k)(\sqrt\Sigma_k V^T_k) $$
+And we can compute these by doing the following on our `movie_matrix`:  
 ```{r}
 U_opt <- svd_opt$u
 V_opt <- svd_opt$v
 S_opt <- diag(d_opt)
 Vt_opt <- t(V_opt)
+```
 
-movie_matrix_svd <- ifelse((U_opt %*% S_opt %*% Vt_opt) > 5, 5,
-                    ifelse((U_opt %*% S_opt %*% Vt_opt) < 0, 0, 
-                           (U_opt %*% S_opt %*% Vt_opt)))
+Additionally, we can check the rank of our $U$, $S$, and $V^T$ matrices:  
+
+```{r}
+paste0('The dimensions of U: ', dim(U_opt)[1], ' by ', dim(U_opt)[2])
+paste0('The dimensions of S: ', dim(S_opt)[1], ' by ', dim(S_opt)[2])
+paste0('The dimensions of t(V): ', dim(Vt_opt)[1], ' by ', dim(Vt_opt)[2])
+```
+As we can see, we've created smaller vectors with rank=$k$.
+
+```{r}
+
+Uk <- U_opt %*% sqrt(S_opt)
+Vk <- sqrt(S_opt) %*% Vt_opt
+item_user_profile_svd <- round((Uk %*% Vk), 2)
+
+movie_matrix_svd <- ifelse((item_user_profile_svd) > 5, 5,
+                    ifelse((item_user_profile_svd) < 0, 0, 
+                           (item_user_profile_svd)))
 
 
 colnames(movie_matrix_svd) <- colnames(movie_matrix)
@@ -161,52 +212,69 @@ rownames(movie_matrix_svd) <- rownames(movie_matrix)
 
 #### Calculating the RMSE for SVD method
 
+Now, with our movie_matrix adjusted with our SVD predictions and saved in a new matrix called `movie_matrix_svd`, we can calculate the RMSE of our new predictions that were calculated using singular value decomposition and dimensionality reduction from a matrix of rank=943 to rank=157:  
 
 ```{r}
 movie_matrix1 <- as(as.matrix(movie_matrix), "realRatingMatrix")
 calcPredictionAccuracy(x = as(movie_matrix_svd, "realRatingMatrix"), data = movie_matrix1)
 ```
 
+From our RMSE calculations, we can see that our root-mean standard error is about 0.39. We can compare this to the RMSE values we computed last week when we ran our item-based collaborative filtering and user-based collaborative filtering algorithms to see which method yielded movie predictions that more closely matched our full matrix.
+
 ***
 
 #### Comparing SVD RMSE to UBCF and IBCF (Previous Week)
 
+**User-based collaborative filtering algorithm**  
+
 ```{r}
-movies_ubcf <- as(movie_matrix, "realRatingMatrix")
+movies_ubcf <- as(movie_matrix_orig, "realRatingMatrix")
 evaluation_scheme <- evaluationScheme(data = movies_ubcf, method = "split", train = 0.8, given = 10, goodRating = 3, k = 10)
 
 ubcf <- Recommender(getData(evaluation_scheme, "train"), method='ubcf', parameter= list(method = 'pearson', nn = 100, normalize = 'center'))
 
-ubcf_predict <- predict(ubcf, newdata = getData(evaluation_scheme, "known"), n = 100, type = "ratings")
+ubcf_predict <- predict(ubcf, newdata = getData(evaluation_scheme, "known"), n = 6, type = "ratings")
 calcPredictionAccuracy(x = ubcf_predict, data = getData(evaluation_scheme, "unknown"), byUser = FALSE)
 ```
+**Item-based collaborative filtering algorithm**  
 ```{r}
-movies_ibcf <- as(movie_matrix, "realRatingMatrix")
+movies_ibcf <- as(movie_matrix_orig, "realRatingMatrix")
 evaluation_scheme_ibcf <- evaluationScheme(data = movies_ibcf, method = "split", train = 0.8, given = 10, goodRating = 3, k = 10)
 
 ibcf <- Recommender(getData(evaluation_scheme_ibcf, "train"), method='ibcf', parameter= list(method = 'pearson', k = 98, normalize = 'center'))
 
-ibcf_predict <- predict(ibcf, newdata = getData(evaluation_scheme_ibcf, "known"), n = 100, type = "ratings")
+ibcf_predict <- predict(ibcf, newdata = getData(evaluation_scheme_ibcf, "known"), n = 6, type = "ratings")
 calcPredictionAccuracy(x = ibcf_predict, data = getData(evaluation_scheme_ibcf, "unknown"), byUser = FALSE)
 ```
 
 ***
 
 
+#### Predicting some ratings with our SVD matrices:  
+
+**GoldenEye predictions for User 2 and User 3?**  
+
+Now with our singular values computed and our SVD matrix ready, we can go back to our original dataset and predict some ratings for users that currently have not seen certain movies. Particularly, we can see from our original matrix that User 2 and User 3 have not watched "GoldenEye". Therefore, using our matrix we can create some predictions:  
+
+```{r}
+movie_matrix_NA <- movie_matrix_orig
+is.na(movie_matrix_NA) <- movie_matrix_NA == 0
+```
+
+```{r}
+user_2_ratings <- movie_matrix_NA[3, ]
+
+U_opt_user2 <- U_opt[3,]
+Vt_opt_user2 <- Vt_opt[,3]
+S_opt_user2 <- S_opt
+
+U_opt_user2 %*% S_opt_user2 %*%   Vt_opt_user2
+```
+
+
 #### Summary 
 
-<!-- After utilizing Item-Item and User-User Collaborative Filtering algorithms, I was able to generate movie recommendations for each user based on our original user-item matrix from the `MovieLense` dataset. Following a bit of data exploration, I tidy'd the data in order to get it ready to run through my algorithms. I briefly discussed normalization of ratings, and ran through ways to split the Large realRatingMatrix into a training and test dataset. Finally, I utilized the `recommenderlab` package to generate my models, and computed error to measure the effectiveness of both algorithms and their subsequent recommendations. Here are a few things I noticed:   -->
+As we can see from our RMSE calculations, our SVD approach yielded a much lower RMSE value than our previous two algorithms -- IBCF and UBCF generated much higher RMSE values. Additionally, utilizing SVD instead of IBCF or UBCF may be more beneficial in this instance of building a recommendation system with the `MovieLense` data. We can test how computationally expensive each algorithm is:  
 
-<!-- + Similar to many user-item matrices, the MovieLense data was quite sparse, so it was important to create a threshold that would subset the sparse matrix to limit bias.   -->
 
-<!-- + Both models generated movie recommendations, and it was interesting to see that each algorithm recommended quite different movies for each user -- there didn't seem to be too much consistency in recommendations across the two methods. Albeit, more in-depth investigation is needed to calculate specific differences, it was interesting to see that the UBCF model recommended some of the same movies more frequently over a larger subset of users than the IBCF model, which recommended the same movies less frequently across users.   -->
 
-<!-- + I noticed that when I was running error calculations on both models, the normalization technique, whether it was 'center' or 'z-score' didn't tend to show major differences in error.   -->
-
-<!-- + I also noticed that when running error calculations on both models, the similarity function used did tend to show differences in error -- the pearson correlation method seemed to yield lower error than the cosine method for both algorithms.   -->
-
-<!-- + Our k-nearest neighbors inputs seemed to show lower error with higher values, which we could see clearly from our plots. Additionally, both of our lowest error values for our IBCF and UBCF algorithms had neighbor values of 100 and 98 respectively, indicating that the larger number of neighbors were more effective for the MovieLense data when computing similarity measures. -->
-
-<!-- + Ultimately, after computing my final error values by averaging the RMSE, MSE, and MAE values, and then taking the lowest average error value across the two algorithms, it appears that the User-User Collaborative Filtering model generated recommendations with lower error. This is something that I hope to explore further in future weeks, since we can do further evaluation on both of these models (plot ROC curves, calculate precision-recall, etc.), but for now, it looks like there were substantial differences in my error outputs between the two techniques. -->
-
-<!-- Overall, this my first time building a recommender system, and it was interesting to dive in using both of these techniques! -->
