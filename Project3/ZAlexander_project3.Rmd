@@ -38,6 +38,7 @@ require(dplyr)
 require(stats)
 require(irlba)
 require(rsvd)
+library(tictoc)
 ```
 ***
 
@@ -159,14 +160,23 @@ lines(x = c(20,20), y = c(0, .9961))
 From our plot of truncated singular values above, we can see that many of our highest singular values (features), and hence most important for our predictions, fall within our optimal range of preserving at least 90% of the energy. Therefore, to make it as computationally efficient as possible, we'll with a very low rank matrix of 20. We can always go back and adjust our $k$ value if a rank-20 matrix yields high error, but for now, we can test this size. Therefore, we can re-run our decomposition using the `irlba` package instead of the `svd` package, since by default, the `irlba` package returns the given rank $k$ matrix instead of the full rank matrix, which the `svd` function does. After running the functions below, we'll effectively reduce the dimensions of our full matrix from $r=943$ to $k=20$ -- a huge improvement.  
 
 ```{r}
+tic("SVD Processing")
 svd_opt <- irlba(movie_matrix, nu=20, nv=20)
 d_opt <- svd_opt$d
-plot(d_opt, pch=20, cex = 0.75, xlab='rank (k)', ylab='singular value')
 ```
-Above, we can see our spread of singular values with rank $k=20$ of our diagonal matrix.  
 
-```{r}
-data.frame(d_opt)
+\br
+
+Below, we can see our 20 singular values with (rank $k=20$) of our diagonal matrix.  
+
+```{r, fig.width=14, fig.height=14, echo=FALSE}
+diag_view <- as.data.frame(round(diag(d_opt), 2))
+
+diag_view %>% 
+    mutate_all(~cell_spec(.x, color = ifelse(.x > 0, "darkred"," black"))) %>%
+    kable(escape = F) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), font_size = 10)
+
 ```
 
 
@@ -206,7 +216,44 @@ movie_matrix_svd <- ifelse((item_user_profile_svd) > 5, 5,
 
 colnames(movie_matrix_svd) <- colnames(movie_matrix)
 rownames(movie_matrix_svd) <- rownames(movie_matrix)
+toc(log = TRUE, quiet = TRUE)
 ```
+
+***
+
+#### Predicting some ratings with our SVD matrices:  
+
+**GoldenEye predictions for User 2 and User 3?**  
+
+Now with our singular values computed and our SVD matrix ready, we can go back to our original dataset and predict some ratings for users that currently have not seen certain movies. As an example, we can see from our original matrix that User 2 and User 3 have not watched "GoldenEye". Therefore, using our matrix we can create some predictions:  
+
+![](https://raw.githubusercontent.com/zachalexander/data612_cuny/master/Project3/userRatings23.jpg)
+
+```{r, echo=FALSE}
+movie_matrix_NA <- movie_matrix_orig
+is.na(movie_matrix_NA) <- movie_matrix_NA == 0
+```
+
+
+First, we can grab our initial `movie_matrix` ratings for Users 2 & 3, and then utilizing our $U$, $S$, and $V^T$ matrices, we can use the dot product to caculate predictions for these previously unknown ratings.  
+```{r}
+user_2_ratings <- movie_matrix_NA[2, ]
+
+U_opt_user2 <- U_opt[2,]
+Vt_opt_user2 <- Vt_opt[,2]
+S_opt_user2 <- S_opt
+
+user_3_ratings <- movie_matrix_NA[3, ]
+
+U_opt_user3 <- U_opt[3,]
+Vt_opt_user3 <- Vt_opt[,3]
+S_opt_user3 <- S_opt
+
+paste0('User 2 predicted rating for Goldeneye: ', round(U_opt_user2 %*% S_opt_user2 %*% Vt_opt_user2, 2))
+paste0('User 3 predicted rating for Goldeneye: ', round(U_opt_user3 %*% S_opt_user3 %*% Vt_opt_user3, 2))
+```
+Obviously these procedures can be done on a much larger scale, and if we needed to reference predicted values for a particular user, it would be very easy to utilize our much lower rank matrices to perform these computations.
+
 
 ***
 
@@ -228,6 +275,7 @@ From our RMSE calculations, we can see that our root-mean standard error is abou
 **User-based collaborative filtering algorithm**  
 
 ```{r}
+tic("UBCF Algorithm Processing")
 movies_ubcf <- as(movie_matrix_orig, "realRatingMatrix")
 evaluation_scheme <- evaluationScheme(data = movies_ubcf, method = "split", train = 0.8, given = 10, goodRating = 3, k = 10)
 
@@ -235,9 +283,12 @@ ubcf <- Recommender(getData(evaluation_scheme, "train"), method='ubcf', paramete
 
 ubcf_predict <- predict(ubcf, newdata = getData(evaluation_scheme, "known"), n = 6, type = "ratings")
 calcPredictionAccuracy(x = ubcf_predict, data = getData(evaluation_scheme, "unknown"), byUser = FALSE)
+toc(log = TRUE, quiet = TRUE)
 ```
+
 **Item-based collaborative filtering algorithm**  
 ```{r}
+tic("IBCF Algorithm Processing")
 movies_ibcf <- as(movie_matrix_orig, "realRatingMatrix")
 evaluation_scheme_ibcf <- evaluationScheme(data = movies_ibcf, method = "split", train = 0.8, given = 10, goodRating = 3, k = 10)
 
@@ -245,36 +296,21 @@ ibcf <- Recommender(getData(evaluation_scheme_ibcf, "train"), method='ibcf', par
 
 ibcf_predict <- predict(ibcf, newdata = getData(evaluation_scheme_ibcf, "known"), n = 6, type = "ratings")
 calcPredictionAccuracy(x = ibcf_predict, data = getData(evaluation_scheme_ibcf, "unknown"), byUser = FALSE)
+toc(log = TRUE, quiet = TRUE)
 ```
+
 
 ***
-
-
-#### Predicting some ratings with our SVD matrices:  
-
-**GoldenEye predictions for User 2 and User 3?**  
-
-Now with our singular values computed and our SVD matrix ready, we can go back to our original dataset and predict some ratings for users that currently have not seen certain movies. Particularly, we can see from our original matrix that User 2 and User 3 have not watched "GoldenEye". Therefore, using our matrix we can create some predictions:  
-
-```{r}
-movie_matrix_NA <- movie_matrix_orig
-is.na(movie_matrix_NA) <- movie_matrix_NA == 0
-```
-
-```{r}
-user_2_ratings <- movie_matrix_NA[3, ]
-
-U_opt_user2 <- U_opt[3,]
-Vt_opt_user2 <- Vt_opt[,3]
-S_opt_user2 <- S_opt
-
-U_opt_user2 %*% S_opt_user2 %*%   Vt_opt_user2
-```
-
 
 #### Summary 
 
 As we can see from our RMSE calculations, our SVD approach yielded a much lower RMSE value than our previous two algorithms -- IBCF and UBCF generated much higher RMSE values. Additionally, utilizing SVD instead of IBCF or UBCF may be more beneficial in this instance of building a recommendation system with the `MovieLense` data. We can test how computationally expensive each algorithm is:  
 
+```{r}
+log <- as.data.frame(unlist(tic.log(format = TRUE)))
+colnames(log) <- c("Run Time")
+knitr::kable(log, format = "html") %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "hover"))
+```
 
 
