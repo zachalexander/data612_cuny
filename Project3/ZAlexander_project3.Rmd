@@ -22,7 +22,7 @@ You may approach this assignment in a number of ways. You are welcome to start w
 
 **Loading packages and the MovieLense dataset**  
 
-Similar to our `Building a Recommendation System with R` book, I'll use the `MovieLense` dataset for this project. In order to access this data, we'll need to load the `recommenderlab` package and the `MovieLense` data stored within this package.
+Similar to [last week's assignment](https://rpubs.com/zachalexander/data612_proj2), and our `Building a Recommendation System with R` book, I'll use the `MovieLense` dataset for this project. In order to access this data, we'll need to load the `recommenderlab` package and the `MovieLense` data stored within this package.
 
 ```{r, warning=FALSE, message=FALSE}
 require(recommenderlab)
@@ -127,11 +127,11 @@ To do this, we can follow the steps outlined in the [YouTube](https://www.youtub
 
 First, we'll need to find our optimal $k$ value from our $d$ singular values, which were computed from our original `movie_matrix`, and organized from greatest to least. Given there were 943 singular values computed from our original matrix during SVD (which matches our initial rank of 943), in practice, we'll reduce the dimensions of our matrix by converting very small singular values to zero in our $d$ vector. To start, we can plot our singular values of our full rank matrix of 943:  
 
-```{r, fig.height=4, fig.width=8}
+```{r, fig.height=4, fig.width=6}
 hist(d, breaks = 25, xlab="singular value", ylab="frequency in d", main = "Histogram of singular values")
 ```
 
-As we can see above, many of our singular values fall close to zero (with one really large value -- 4,528). To effectively reduce the dimensions of our matrices, we can convert many of these values that are close to zero, to zero (and thus remove them from our matrices in $V$ and $U$ when doing SVD), since they won't likely hold much weight in our final predictions of ratings. We can actually find the optimal k value by utilizing the following functions:  
+As we can see above, many of our singular values fall close to zero (with one really large value -- 4,528). To effectively reduce the dimensions of our matrices, we can convert many of these values that are close to zero, to zero (and thus remove them from our matrices in $V$ and $U$ when doing SVD), since these concept values won't likely hold much weight in our final predictions of ratings. We can actually find the optimal k value by utilizing the following functions:  
 
 
 In order to find the optimal k, we'll need to first compute the sum of all squares of singular values in our original movies dataset:
@@ -139,9 +139,9 @@ In order to find the optimal k, we'll need to first compute the sum of all squar
 ss_all <- sum((d)^2)
 ```
 
-Then, we can find the optimal $k$ by making sure we are keeping at least 80-90% total energy of our singular values vector for prediction. This is based on our formula:  
+Then, we can find the optimal $k$ by making sure we are keeping at least 90% total energy of our singular values vector for prediction. This is based on our formula:  
 
-$$\frac{\sum\limits_{i}^k \sigma_{i}^2}{\sum\limits_{i}^r \sigma_{i}^2} \leq 0.9$$
+$$\frac{\sum\limits_{i}^k \sigma_{i}^2}{\sum\limits_{i}^r \sigma_{i}^2} \geq 0.9$$
 
 
 We can plot this out in a graph and see where we reach our minimum energy threshold of 90%:  
@@ -157,7 +157,7 @@ lines(x = c(0,20), y = c(.9961, .9961))
 lines(x = c(20,20), y = c(0, .9961))
 ```
 
-From our plot of truncated singular values above, we can see that many of our highest singular values (features), and hence most important for our predictions, fall within our optimal range of preserving at least 90% of the energy. Therefore, to make it as computationally efficient as possible, we'll with a very low rank matrix of 20. We can always go back and adjust our $k$ value if a rank-20 matrix yields high error, but for now, we can test this size. Therefore, we can re-run our decomposition using the `irlba` package instead of the `svd` package, since by default, the `irlba` package returns the given rank $k$ matrix instead of the full rank matrix, which the `svd` function does. After running the functions below, we'll effectively reduce the dimensions of our full matrix from $r=943$ to $k=20$ -- a huge improvement.  
+From our plot of singular values above, we can see that many of our highest singular values (features), and hence most important for our predictions, fall within our optimal range of preserving at least 90% of the energy. Therefore, to make it as computationally efficient as possible, we'll work with a very low rank matrix of 20 -- going lower than 20 may increase our error. We can always go back and adjust our $k$ value if a rank-20 matrix yields high error, but for now, we can test this size. Therefore, we can re-run our decomposition using the `irlba` package instead of the `svd` package, since by default, the `irlba` package returns the given rank $k$ matrix instead of the full rank matrix, which the `svd` function does. After running the functions below, we'll effectively reduce the dimensions of our full matrix from $r=943$ to $k=20$ -- a huge improvement.  
 
 ```{r}
 tic("SVD Processing")
@@ -182,10 +182,10 @@ diag_view %>%
 
 Now, with our optimal $k$ value, we can re-compute our item-user matrix under a much smaller dimension using our updated equation:  
 
-$$A_k=U_kS_kV^T_k $$
-Where $A$ is our updated item-user matrix with rank = $k$, using $U$, $S$, and $V^T$ all at rank = $k$ as well. This equation above is expanded to:  
+$$A=U_kS_kV^T_k $$
+Where $A$ is our updated item-user matrix of predictions, using $U$, $S$, and $V^T$ all at rank = $k$. This equation above is expanded to:  
 
-$$A_k=(U_k \sqrt\Sigma_k)(\sqrt\Sigma_k V^T_k) $$
+$$A=(U_k \sqrt\Sigma_k)(\sqrt\Sigma_k V^T_k) $$
 And we can compute these by doing the following on our `movie_matrix`:  
 ```{r}
 U_opt <- svd_opt$u
@@ -201,7 +201,7 @@ paste0('The dimensions of U: ', dim(U_opt)[1], ' by ', dim(U_opt)[2])
 paste0('The dimensions of S: ', dim(S_opt)[1], ' by ', dim(S_opt)[2])
 paste0('The dimensions of t(V): ', dim(Vt_opt)[1], ' by ', dim(Vt_opt)[2])
 ```
-As we can see, we've created smaller vectors with rank=$k$.
+As we can see, we've created smaller vectors, all with rank = $k$ = 20. Finally, we can use these smaller vectors to create predictions for our much broader dataset (with dimensions of 943 by 1664):
 
 ```{r}
 
@@ -219,6 +219,8 @@ rownames(movie_matrix_svd) <- rownames(movie_matrix)
 toc(log = TRUE, quiet = TRUE)
 ```
 
+In the end, we've created a new `movie_matrix_svd` matrix, that has our predictions utilizing our singular values.
+
 ***
 
 #### Predicting some ratings with our SVD matrices:  
@@ -235,7 +237,7 @@ is.na(movie_matrix_NA) <- movie_matrix_NA == 0
 ```
 
 
-First, we can grab our initial `movie_matrix` ratings for Users 2 & 3, and then utilizing our $U$, $S$, and $V^T$ matrices, we can use the dot product to caculate predictions for these previously unknown ratings.  
+First, we can grab our initial `movie_matrix` ratings for Users 2 & 3, and then utilizing our $U$, $S$, and $V^T$ matrices, we can use the dot product to calculate predictions for these previously unknown ratings.  
 ```{r}
 user_2_ratings <- movie_matrix_NA[2, ]
 
@@ -259,14 +261,14 @@ Obviously these procedures can be done on a much larger scale, and if we needed 
 
 #### Calculating the RMSE for SVD method
 
-Now, with our movie_matrix adjusted with our SVD predictions and saved in a new matrix called `movie_matrix_svd`, we can calculate the RMSE of our new predictions that were calculated using singular value decomposition and dimensionality reduction from a matrix of rank=943 to rank=157:  
+Now, with our movie_matrix adjusted with our SVD predictions and saved in a new matrix called `movie_matrix_svd`, we can calculate the RMSE of our new predictions that were calculated using singular value decomposition and dimensionality reduction from a matrix of rank=943 to rank=20:  
 
 ```{r}
 movie_matrix1 <- as(as.matrix(movie_matrix), "realRatingMatrix")
 calcPredictionAccuracy(x = as(movie_matrix_svd, "realRatingMatrix"), data = movie_matrix1)
 ```
 
-From our RMSE calculations, we can see that our root-mean standard error is about 0.39. We can compare this to the RMSE values we computed last week when we ran our item-based collaborative filtering and user-based collaborative filtering algorithms to see which method yielded movie predictions that more closely matched our full matrix.
+From our RMSE calculations, we can see that our root-mean standard error is about 0.23. We can compare this to the RMSE values we computed last week when we ran our item-based collaborative filtering and user-based collaborative filtering algorithms to see which method yielded movie predictions that more closely matched our full matrix.
 
 ***
 
@@ -312,5 +314,5 @@ colnames(log) <- c("Run Time")
 knitr::kable(log, format = "html") %>%
   kableExtra::kable_styling(bootstrap_options = c("striped", "hover"))
 ```
-
+As we can see above, our SVD processing was much faster than our UBCF or IBCF algorithms. The processing time for SVD was about **three times faster** than our UBCF processing and about **five times faster** than our IBCF processing! In the end, SVD does provide certain advantages for a user-item matrix such as movie ratings -- and it's success has been well documented in the [Netflix Prize](https://en.wikipedia.org/wiki/Netflix_Prize). However, as mentioned in the weekly materials, SVD can provide singular values that are difficult to interpret, which leads some to look for other alternatives.
 
