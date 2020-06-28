@@ -1,0 +1,350 @@
+---
+title: 'DATA 612 - Project #4'
+author: "Zach Alexander"
+date: "6/27/2020"
+output: html_document
+---
+
+***
+
+#### Instructions
+
+The goal of this assignment is give you practice working with accuracy and other recommender system metrics.    
+
+1. As in your previous assignments, compare the accuracy of at least two recommender system algorithms against your offline data.
+2. Implement support for at least one business or user experience goal such as increased serendipity, novelty, or diversity.
+3. Compare and report on any change in accuracy before and after you’ve made the change in #2.
+4. As part of your textual conclusion, discuss one or more additional experiments that could be performed and/or metrics that could be evaluated only if online evaluation was possible. Also, briefly propose how you would design a reasonable online evaluation environment. 
+
+
+***
+
+#### Jester Dataset
+
+***
+
+**Loading packages and the Jester dataset**  
+
+Similar to the procedure outlined in our `Building a Recommendation System with R` book, I'll use the `Jester` dataset for this project. This dataset is different from the `MovieLense` data I utilized in previous weeks. In order to access this data, we'll need to load the `recommenderlab` package and the `Jester` data stored within this package.
+
+```{r, warning=FALSE, message=FALSE}
+require(recommenderlab)
+require(ggplot2)
+data(Jester5k)
+jester_df <- as(Jester5k, 'data.frame')
+require(knitr)
+require(kable)
+require(kableExtra)
+require(devtools)
+require(tidyverse)
+require(dplyr)
+require(stats)
+require(irlba)
+require(rsvd)
+library(tictoc)
+```
+***
+
+#### Data exploration and checking sparsity
+
+Similar to previous weeks, we'll start by doing some basic data exploration and checking the sparsity of our user-joke matrix:
+
+```{r}
+dim(Jester5k)
+```
+As we can see, there are 5000 users and 100 jokes in this dataset. From this, we can see that there are 500,000 possible user-joke ratings (5000 * 100).  
+
+Next, we can check the sparsity of the dataset by running the following calculation:  
+
+```{r}
+jester_orig <- as.matrix(Jester5k@data)
+
+length(jester_orig[jester_orig==0]) / (ncol(jester_orig)*nrow(jester_orig))
+```
+As we can see above, different from the past few weeks when evaluating the `MovieLense` dataset, the matrix isn't as sparse, with a large majority (about 72% of user-joke ratings) with an available joke rating. Before running our algorithms, we'll need to handle our missing values, which is about 28% of the `Jester` dataset.
+
+***
+
+**Missing values in Jester Data**
+
+In the `Jester` dataset, the missing values have been imputed to zero. For our purposes, this is not ideal, since this would greatly alter algorithms and recommendations later on. Therefore, we will create a matrix that converts our missing values from zero to NA:
+
+
+```{r}
+# creating movie_matrix replacing zeros with NAs
+jester_matrix <- jester_orig
+is.na(jester_matrix) <- jester_matrix == 0
+```
+
+Now, with our matrix containing missing ratings instead of zeros, we can create a new matrix of the most relevant users and jokes:
+
+```{r}
+ratings_jester <- Jester5k[rowCounts(Jester5k) > 50, colCounts(Jester5k) > 100]
+
+ratings_jester
+```
+With our more relevant matrix, we can start to prepare our data for evaluation.
+
+***
+
+#### Preparing the Jester data for evaluation
+
+In order to run effective evaluations, we'll first need to split the data. Among the methods outlined in the book, I'll use k-fold to validate the models and split accordingly into training and testing datasets. To do this, we need to first identify how many folds we'll do on the data:
+
+```{r}
+n_fold <- 4
+```
+
+Next, we'll need to determine how many jokes to use to generate our recommendations, and the rest of the jokes will be used to test our model accuracy. To ensure our parameter is lower than the minimum number of jokes rated by any user, we can find the minimum value:  
+
+```{r}
+min(rowCounts(ratings_jester))
+```
+Therefore, we can create an `items_to_keep` variable at 30:  
+
+```{r}
+items_to_keep <- 30
+```
+
+With this variable set, we'll next need to think of a viable rating threshold, which would constitute a good rating for a joke. To keep consistent with our book, I'll start by puting the rating threshold at 3. However, I may adjust this according to the outputs given that there is a possibility for negative ratings of jokes (for instance, we could put a good_rating threshold at zero instead).  
+
+```{r}
+rating_threshold <- 3
+```
+
+Now, given that we are using the `recommenderlab` package, we can set up an evaluation scheme similar to previous weeks to work through splitting our data into training and testing datasets.
+
+```{r}
+eval_sets <- evaluationScheme(data = ratings_jester, method = "cross-validation", k= n_fold, given = items_to_keep, goodRating = rating_threshold)
+
+eval_sets
+```
+We can see above we have successfully set up our evaluation scheme. In order to actually do the split, we now need to run the `getData` function:  
+
+```{r}
+getData(eval_sets, "train")
+getData(eval_sets, "known")
+getData(eval_sets, "unknown")
+```
+As we can see from our outputs, we have successfully separated out our training and test sets. The "unknown" portion of the test set includes the unknown joke ratings by user. We can see the distribution of these below:  
+
+```{r, message=FALSE, warning=FALSE}
+qplot(rowCounts(getData(eval_sets, "unknown"))) + geom_histogram(binwidth = 10) + ggtitle("Unknown jokes by user")
+```
+\br
+
+Similar to the `MovieLense` dataset described in the textbook, the number of unknown ratings for users varies quite a bit.
+
+***
+
+#### Comparing three different models (IBCF, UBCF and SVD)
+
+In order to do any evaluation, we have to build our models and run them first. For this dataset, I'll run two item-based collaborative filtering models (IBCF) -- with differences in similarity calculations, two user-based collaborative filtering models (UBCF) -- same parameters as IBCF, a singular value decomposition model (SVD) model, and a model that picks random jokes to recommend to establish a baseline:    
+
+```{r}
+models_to_evaluate <- list(
+  IBCF_cos = list(name = "IBCF", param = list(method="cosine")),
+  IBCF_pear = list(name = "IBCF", param = list(method="pearson")),
+  UBCF_cos = list(name = "UBCF", param = list(method="cosine")),
+  UBCF_pear = list(name = "UBCF", param = list(method="pearson")),
+  SVD = list(name = "SVD"),
+  random = list(name = "RANDOM")
+)
+```
+
+Next, in order to evaluate our models properly, we'll need to test them with varying numbers of jokes recommended. We'll cap the number of jokes at 100.  
+
+```{r}
+n_recc <- c(1, 5, seq(10, 100, 10))
+```
+
+With this last step in place, we are now ready to run and evaluate our models:  
+
+```{r}
+lst_results <- evaluate(x = eval_sets, method = models_to_evaluate, n= n_recc)
+```
+***
+
+
+**ROC Curve**  
+
+Now, with our models run, we can run some comparisons to see which model is most suitable to our needs:
+
+```{r}
+plot(lst_results, annotate = 1, legend = "bottomright")
+title("ROC curve")
+```
+From the ROC curve plot above, identifying the model with highest AUC, we can see that the UBCF model with pearson correlation was the best-performing technique. Additionally, we can build a precision-recall chart to measure this relationship between the different models:  
+
+```{r}
+plot(lst_results, "prec/rec", annotate = 1, legend = "topright")
+title("Precision-Recall")
+```
+
+Again, we can see that the UBCF model with pearson correlation is the top model.
+
+From these ROC and precision-recall curves, we can determine that our UBCF model using pearson correlation will most likely be the optimal model we can use for our joke recommendations. Now, with our UBCF model selected, we can optimize the numeric parameters to determine the best number of jokes to use for our nearest neighbors calculations:  
+
+```{r}
+v_k <- c(5, 10, 20, 30, 40, 50, 60, 70, 80)
+```
+
+And similar to above, we can create a list of models to evaluate based on differences in our nearest neighbors value:  
+
+```{r}
+mods_to_eval <- lapply(v_k, function(k){
+  list(name = "UBCF", param = list(method = "pearson", nn=k))
+})
+
+names(mods_to_eval) <- paste0("UBCF_nn_", v_k)
+
+list_results <- evaluate(x = eval_sets, method = mods_to_eval, n = n_recc)
+```
+And here are the ROC and precision-recall curves:  
+
+```{r}
+plot(list_results, annotate = 1, legend = "bottomright")
+title("ROC Curve - Nearest Neighbors Threshold")
+```
+It looks like, after running our nearest neighbors under different parameter values for our UBCF model of choice, even if we set a very high nearest neighbors value, our model won't be able to recommend a larger percentage of jokes that users like. Therefore, we can keep 20 as our value for nearest neighbors.  
+
+We can see this pretty much holds true when we plot our Precision-Recall curve:  
+
+```{r}
+plot(list_results, "prec/rec", annotate = 1, legend = "bottomleft")
+title("Precision-Recall - Nearest Neighbors Threshold")
+```
+
+In the end, we can take a look at the RMSE value of our model of choice:  
+
+```{r}
+fnl_rec <- Recommender(getData(eval_sets, "train"), "UBCF", parameter = list(method = "pearson", nn=20))
+prediction <- predict(fnl_rec, getData(eval_sets, "known"), type="ratings", n=10)
+
+calcPredictionAccuracy(prediction, getData(eval_sets, "unknown"))
+```
+We can see here that the RMSE value is quite high for our optimal recommender model, but for joke ratings on scale of -10 to 10, it may still provide good joke recommendations to its users. Additionally, given that it's variance is quite high, it could demonstrate that users may be more flexible (open-minded) with their interpretation of jokes, and not as predictable with how they'll respond to a particular one. To make this model reflect more of an everyday experience, where sometimes you have friends tell jokes that make you laugh, and others that make you wince, we can do our best to introduce some **serendipity** into the model.  
+
+***
+
+#### Introducing serendipity into our model and comparing to our original UBCF model
+
+Instead of just recommending jokes that a user is more likely to give a good rating to based on past ratings or jokes that were given a good rating by similar users, we can introduce some serendipity to purposely recommend some jokes to users that don't fall within our nearest neighbors calculations. By doing this, it may be good testing ground to see how far users will go to stretch their appreciation of jokes that fall a bit outside of their comfort zone. It's difficult to predict the impact of this in offline analysis, but there is a possibility that by doing an online evaluation of ratings, that this serendipitous model may be well liked by users. However, from an offline analysis perspective, by randomizing the ratings, I fully expect our RMSE values to increase.
+
+To do this, we'll need to locate our original Jester data file and save a new version as `jester_serendip`. Then, we can take any rating on a joke that falls between -3 and 3, and randomize the values. This way, we'll target user ratings that are a bit more impartial (do not have very strong opinions on the joke either way), and see if this changes our accuracy from our previous model evaluations. See below for the function to randomize a portion of our user-joke ratings:  
+
+```{r}
+randomize <- function(x){
+  x = sample(c(-3, -2, -1, 1, 2, 3), 1, replace = TRUE)
+}
+```
+
+And here's the result of implementing the function on our `Jester5k` dataset:
+```{r}
+jester_serendip <-  Jester5k
+jester_serendip@data@x <- sapply(jester_serendip@data@x, function(x){
+  if ((x <= 3 & x > 0) | (x >= -3 & x < 0)){
+    x <- randomize(x)
+  } else {
+    x
+  }
+})
+```
+
+Now, with our ratings randomized, we can evaluate this new matrix of ratings utilizing the UBCF model that we determined to be most accurate for our `Jester` dataset:
+
+```{r}
+ratings_jester_seren <- jester_serendip[rowCounts(jester_serendip) > 50, colCounts(jester_serendip) > 100]
+
+eval_scheme_seren <- evaluationScheme(data = jester_serendip, method = "cross-validation", k= n_fold, given = items_to_keep, goodRating = rating_threshold)
+
+jester_mod_seren <- Recommender(getData(eval_scheme_seren, "train"), "UBCF", parameter = list(method = "pearson", nn=20))
+
+
+jester_mod_seren_predict <- predict(jester_mod_seren, getData(eval_sets, "known"), type="ratings", n=10)
+
+
+jester_mod_seren_predict@data@x[jester_mod_seren_predict@data@x[] < -10] <- -10
+jester_mod_seren_predict@data@x[jester_mod_seren_predict@data@x[] > 10] <- 10
+
+calcPredictionAccuracy(jester_mod_seren_predict, getData(eval_sets, "unknown"))
+```
+Surprisingly, it appears that our RMSE value is slightly lower when we randomize the ratings between -3 and 3. My only thoughts as to why this may be the case is that given the high variability from our initial UBCF model (with RMSE around +/- 4), any alteration to values that are quite impartial, and adjusting based on a range of 6 values may not make too much of an impact -- and actually provide a bit more accuracy. We can test this by randomizing the ratings between -7 and 7 to see if this decreases the accuracy and supports our initial thought that by randomizing the values, our new serendipidous model will yield a higher RMSE value than our original.  
+
+First, we'll adjust our randomizing function to include values from -7 to 7:  
+
+```{r}
+randomize_2 <- function(x){
+  x = sample(c(-7, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4, 5, 6, 7), 1, replace = TRUE)
+}
+```
+
+Then, we'll iterate through the joke ratings and randomize ratings that fall between -7 and 7 (excluding zeros):  
+
+```{r}
+jester_serendip_2 <-  Jester5k
+jester_serendip_2@data@x <- sapply(jester_serendip_2@data@x, function(x){
+  if ((x <= 7 & x > 0) | (x >= -7 & x < 0)){
+    x <- randomize_2(x)
+  } else {
+    x
+  }
+})
+```
+
+
+Finally, we can re-run our model after isolating the most relevant users and jokes (similar to past steps), account for any predictions above and below our rating range of -10 and 10, and calculate the RMSE.  
+```{r}
+ratings_jester_seren_2 <- jester_serendip_2[rowCounts(jester_serendip_2) > 50, colCounts(jester_serendip_2) > 100]
+
+eval_scheme_seren_2 <- evaluationScheme(data = ratings_jester_seren_2, method = "cross-validation", k= n_fold, given = items_to_keep, goodRating = rating_threshold)
+
+jester_mod_seren_2 <- Recommender(getData(eval_scheme_seren_2, "train"), "UBCF", parameter = list(method = "pearson", nn=20))
+
+
+jester_mod_seren_predict_2 <- predict(jester_mod_seren_2, getData(eval_sets, "known"), type="ratings", n=10)
+
+
+jester_mod_seren_predict_2@data@x[jester_mod_seren_predict_2@data@x[] < -10] <- -10
+jester_mod_seren_predict_2@data@x[jester_mod_seren_predict_2@data@x[] > 10] <- 10
+
+calcPredictionAccuracy(jester_mod_seren_predict_2, getData(eval_sets, "unknown"))
+```
+**Our final RMSE values**  
+
+```{r}
+orig <- calcPredictionAccuracy(prediction, getData(eval_sets, "unknown"))[[1]]
+seren_1 <- calcPredictionAccuracy(jester_mod_seren_predict, getData(eval_sets, "unknown"))[[1]]
+seren_2 <- calcPredictionAccuracy(jester_mod_seren_predict_2, getData(eval_sets, "unknown"))[[1]]
+
+names <- c('Original Optimized UBCF Model', 'UBCF Model w/ Serendipity (-3 to 3)', 'UBCF Model w/ Serendipity (-7 to 7)')
+RMSE_vals <- c(orig, seren_1, seren_2)
+
+RMSE_df <- data.frame(RMSE_vals)
+rownames(RMSE_df) <- names
+
+RMSE_df %>% 
+  kable() %>% 
+  kable_styling(bootstrap_options = 'striped', full_width = FALSE)
+```
+
+As we can see, when we randomize the ratings from -7 to 7, we can indeed expect our RMSE value to be greater than our original model. Because we adjusted our range of randomization, we can now fully expect that our recommender will start to serve jokes to users in a more randomized fashion that falls outside of our similarity scores that were predicted based on our original UBCF model. Again, this may be a helpful adjustment -- adding serendipity may actually make the recommender a bit more realistic and exciting to users, so online analysis should be coupled with this offline analysis to see which recommender is best suited for users of the Jester recommender system.  
+
+
+***
+
+#### Coupling our offline analysis with online evaluation  
+
+As mentioned as part of our conclusion to adding serendipity to our UBCF model, making sure to evaluate these separate models in conjuction with evaluation in an online environment is important to be able to adjust algorithms and make a recommender system that is best suited for the Jester audience and user base. It would be interesting to set up an online survey to obtain quick feedback from users about their experience. For instance, we could start with our original UBCF model to serve up jokes to a subset of users, ask them to fill out a survey, switch to one of our serendipitous models, and serve up jokes using this model to the same subset of users. We could then ask them to fill out another survey. In the end, we could compare the feedback between the first survey and the second survey to see which model yielded a better online experience for users.  
+
+Additionally, we could take an approach that relies more on intuition, where we could measure user activity on the Jester website through metrics such as clicks, the amount of time spent on the website, and ratings on jokes. By doing a bit of A/B testing between our original and serendipitous models, we could then see if one model can be attributed to users spending more time on the website (suggesting they were enjoying the content more than the other model), and also take a look at specific jokes to see if certain ones motivated a user to leave the website or click through to the next joke to see another. All of these metrics would be important insights into building a narrative of the user experience, and to help measure the success of the recommenders that we have developed and evaluated in an offline environment.  
+
+***
+
+#### Final Summary  
+
+In the end, it was interesting to evaluate different types of models in an offline environment, testing the performance of item-based collaborative filtering models, user-based collaborative filtering models, and models that implement singular value decomposition. When we were able to narrow down the model that performed the best, it was helpful to measure the optimal nearest neighbors value for our similarity calculations and run this model to measure the optimal RMSE. Additionally, it was helpful to implement serendipity into our optimized model to determine the effects of randomizing some of the joke ratings -- it yielded some interesting conclusions about our model accuracy and helped us think more critically about the effectiveness of pushing this to an online environment. With an RMSE value as high as 4, I'd be tentative to suggest rolling this out to an online environment, however, if this was the case, it was important to think through ways to evaluate its performance in the online environment and to compare the offline evaluation of our models with the online evaluation metrics devised in the above section. Overall, it was nice to work with a different dataset, to evaluate our models in an offline environment, and to think critically about what this would look like in an online environment!  
+
+
+
+
